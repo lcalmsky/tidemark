@@ -1,0 +1,61 @@
+#!/bin/bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+output="${1:-$root/build}"
+app="$output/Tidemark.app"
+binary="$root/.build/release/tidemark"
+
+cd "$root"
+
+build_args=(-c release)
+if [[ "${SWIFT_BUILD_DISABLE_SANDBOX:-0}" == "1" ]]; then
+    build_args+=(--disable-sandbox)
+fi
+swift build "${build_args[@]}"
+
+version="$("$binary" --version | awk '{print $2}')"
+if [[ -z "$version" ]]; then
+    echo "tidemark --version 에서 버전을 읽지 못했습니다" >&2
+    exit 1
+fi
+
+rm -rf "$app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+cp "$binary" "$app/Contents/MacOS/tidemark"
+# 아이콘은 scripts/make-icon.swift 가 만든다.
+cp "$root/assets/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
+
+cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.lcalmsky.tidemark</string>
+    <key>CFBundleName</key>
+    <string>Tidemark</string>
+    <key>CFBundleDisplayName</key>
+    <string>Tidemark</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleExecutable</key>
+    <string>tidemark</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$version</string>
+    <key>CFBundleVersion</key>
+    <string>$version</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
+codesign --force --sign - --timestamp=none "$app"
+echo "$app"
