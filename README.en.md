@@ -37,7 +37,7 @@ For each limit the app draws a ring, a percentage, and the time to reset, in tha
 
 | What you see | Meaning |
 |---|---|
-| Letter inside the ring | The kind of limit. `S` is the session limit and is teal. `W` is the weekly limit across all models and is indigo. A model-scoped weekly limit uses the first letter of the model name; Fable is pink and other models are gray. |
+| Letter inside the ring | The kind of limit. `S` is the session limit and is teal. `W` is the weekly limit across all models and is indigo. A model-scoped weekly limit uses the first letter of the model name; Fable is purple and other models are gray. |
 | 16px ring | The usage of that limit. It fills clockwise from 12 o'clock and leaves the remaining share as a faint track. The filled arc uses the same color as the letter inside, switches to orange at 75%, and switches to red at 90%. |
 | Percentage | Rounded usage. It turns orange at 75% and red at 90%. |
 | Time next to it | Time until reset, abbreviated as `2d3h`, `4h12m`, or `45m`. |

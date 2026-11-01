@@ -246,7 +246,7 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch letter {
         case "S": return .systemTeal
         case "W": return .systemIndigo
-        case "F": return .systemPink
+        case "F": return .systemPurple
         default: return .systemGray
         }
     }
