@@ -1,8 +1,8 @@
 class Tidemark < Formula
   desc "Menu bar app that shows Claude plan usage limits"
   homepage "https://github.com/lcalmsky/tidemark"
-  url "https://github.com/lcalmsky/tidemark/archive/refs/tags/v0.1.1.tar.gz"
-  sha256 "54b7c6e9a2864052cc2f3687665ff14d1a082f4e338a45af233d1516b10f089d"
+  url "https://github.com/lcalmsky/tidemark/archive/refs/tags/v0.1.2.tar.gz"
+  sha256 "d0439a4a743ff9ec4fe18daf603f367278266a7eee86798e876ef6a35413ba78"
   head "https://github.com/lcalmsky/tidemark.git", branch: "main"
 
   depends_on :macos
