@@ -62,8 +62,8 @@ brew services start lcalmsky/tidemark/tidemark
 앱은 Claude Code 가 쓰는 계정의 토큰만 읽고, 다른 계정의 토큰으로 넘어가지 않습니다.
 
 - Orca 앱에서 Claude 계정을 고르면 `~/Library/Application Support/orca/claude-profiles/selected-host` 파일에 그 계정의 설정 디렉터리가 기록됩니다. 앱은 이 파일이 있으면 그 디렉터리를 씁니다. 키체인 서비스 이름은 `Claude Code-credentials-<디렉터리 경로 SHA-256 앞 8자리>` 이고, 이메일은 `<디렉터리>/.claude.json` 에서 읽습니다.
-- 이 파일이 없으면 기본 계정을 씁니다. 키체인 서비스 이름은 `Claude Code-credentials` 이고, 이메일은 `~/.claude.json` 에서 읽습니다.
-- 파일이 있는데 읽지 못하거나 비어 있으면 기본 계정으로 넘어가지 않고 `계정 선택 파일 읽기 실패` 를 표시합니다.
+- 이 파일이 없거나 비어 있으면 기본 계정을 씁니다. Orca 는 기본 계정을 고르면 이 파일을 빈 내용으로 남깁니다. 키체인 서비스 이름은 `Claude Code-credentials` 이고, 이메일은 `~/.claude.json` 에서 읽습니다.
+- 파일이 있는데 읽지 못하면 기본 계정으로 넘어가지 않고 `계정 선택 파일 읽기 실패` 를 표시합니다.
 - 선택한 계정의 키체인 항목이 없으면 오류로 표시하고 다른 계정의 토큰을 찾지 않습니다.
 - 앱은 60초마다 계정이 바뀌었는지 확인하고, 바뀌었으면 이전 계정의 수치를 지운 뒤 새로 조회합니다.
 

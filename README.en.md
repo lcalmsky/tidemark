@@ -62,8 +62,8 @@ Clicking a ring in the menu bar opens the following menu.
 The app reads only the token of the account Claude Code uses, and never falls back to another account's token.
 
 - When you pick a Claude account in the Orca app, it records that account's config directory in `~/Library/Application Support/orca/claude-profiles/selected-host`. If the file exists the app uses that directory. The keychain service is `Claude Code-credentials-<first 8 characters of the SHA-256 of the directory path>` and the email is read from `<directory>/.claude.json`.
-- If the file does not exist the app uses the default account. The keychain service is `Claude Code-credentials` and the email is read from `~/.claude.json`.
-- If the file exists but cannot be read or is empty, the app shows `계정 선택 파일 읽기 실패` (selection file unreadable) instead of falling back to the default account.
+- If the file does not exist or is empty the app uses the default account. Orca leaves the file empty when you pick the default account. The keychain service is `Claude Code-credentials` and the email is read from `~/.claude.json`.
+- If the file exists but cannot be read, the app shows `계정 선택 파일 읽기 실패` (selection file unreadable) instead of falling back to the default account.
 - If the selected account has no keychain entry, the app reports an error and does not look for another account's token.
 - The app checks for an account switch every 60 seconds. When the account changes it clears the previous account's numbers and fetches again.
 

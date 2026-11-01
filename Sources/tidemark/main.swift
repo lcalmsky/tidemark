@@ -525,14 +525,14 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private struct SelectionUnreadable: Error {}
 
     /// 선택된 config 디렉터리. nil 이면 기본 계정(~/.claude)이다.
-    /// 선택 파일이 없을 때만 기본 계정이다. 파일이 있는데 읽지 못하거나 비어 있으면 오류로 던진다.
+    /// 선택 파일이 없거나 비어 있으면 기본 계정이다. Orca 는 기본 계정을 고르면 빈 내용을 쓴다.
+    /// 파일이 있는데 읽지 못하면 오류로 던진다.
     private static func currentConfigDir() throws -> String? {
         guard FileManager.default.fileExists(atPath: selectedHostPath) else { return nil }
         guard let data = FileManager.default.contents(atPath: selectedHostPath),
               let raw = String(data: data, encoding: .utf8) else { throw SelectionUnreadable() }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw SelectionUnreadable() }
-        return trimmed
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// 기본이 아닌 config 디렉터리의 키체인 항목에는 경로 SHA-256 앞 8자리가 붙는다.
