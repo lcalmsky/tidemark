@@ -3,7 +3,7 @@ import CryptoKit
 import Foundation
 
 enum AppInfo {
-    static let version = "0.1.1"
+    static let version = "0.1.2"
 }
 
 // MARK: - 응답 모델
