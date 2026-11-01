@@ -267,12 +267,11 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// 12 시 방향에서 시계 방향으로 채우는 원형 게이지. 가운데에 한도 글자를 넣는다.
-    /// 경고 구간(75% 이상)에서는 채움색이 한도 색 대신 경고색이 된다.
+    /// 채움색은 50% 까지 한도 색이고, 75% 까지 주황으로, 100% 까지 빨강으로 조금씩 바뀐다.
     private func ringItem(letter: String, percent: Double) -> TitleItem {
         let diameter = Self.ringDiameter
         let lineWidth = Self.ringLineWidth
         let tint = badgeColor(for: letter)
-        let fill = percent >= 75 ? color(for: percent) : tint
         let label = NSAttributedString(string: letter, attributes: [
             .font: Self.ringLetterFont,
             .foregroundColor: tint,
@@ -305,9 +304,19 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
             arc.lineWidth = lineWidth
             arc.lineCapStyle = .round
-            fill.setStroke()
+            // 시스템 색은 다크·라이트 모드에 따라 달라서, 그리는 시점에 섞는다.
+            Self.rampColor(tint: tint, percent: percent).setStroke()
             arc.stroke()
         }
+    }
+
+    private static func rampColor(tint: NSColor, percent: Double) -> NSColor {
+        if percent <= 50 { return tint }
+        if percent <= 75 {
+            return tint.blended(withFraction: CGFloat((percent - 50) / 25), of: .systemOrange) ?? tint
+        }
+        let fraction = CGFloat(min((percent - 75) / 25, 1))
+        return NSColor.systemOrange.blended(withFraction: fraction, of: .systemRed) ?? .systemOrange
     }
 
     private func color(for percent: Double) -> NSColor {
