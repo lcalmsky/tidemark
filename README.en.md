@@ -48,10 +48,13 @@ Until the first response arrives after launch the app draws `C …`, and appends
 
 Clicking a ring in the menu bar opens the following menu.
 
-- `계정: <email> (<plan>)` appears at the top. If the email cannot be read, the config directory name is shown instead.
-- Each limit gets a line like `세션  42%  · 리셋까지 4h 12m`. A model-scoped weekly limit shows the model name in place of `주간`.
-- The time of the last successful fetch appears as `갱신: 14:05`.
-- When the last fetch failed, an `오류: ...` line appears as well.
+- Each account gets a header line like `personal · me@example.com (max)`. If the email cannot be read only the name is shown, and the current account is checked. With the Orca source only the first 8 characters of the name are shown.
+- Under it, each limit gets an indented line like `세션  42%  · 리셋까지 4h 12m`. A model-scoped weekly limit shows the model name in place of `주간`.
+- Next comes the time of that account's last successful fetch as `갱신: 14:05`, plus an `오류: ...` line when the fetch failed.
+- With the cca source, clicking an account header runs `cca use <name>` and makes that account the default. With the Orca source the header does nothing when clicked; switch accounts in Orca instead.
+- Below the accounts a `전환은 새로 여는 claude 세션부터 적용` line appears. With the Orca source it says `계정 전환은 Orca 에서`. When cca cannot be run or its response cannot be read, an `오류: ...` line appears under it.
+- The `계정 출처` submenu picks where the account list and the current account are read from: `cca` or `Orca`. The active one is checked.
+- `자동 전환 (95%)` can only be turned on with the cca source; it is disabled with the Orca source.
 - `지금 새로고침 ⌘R` fetches again immediately.
 - `종료 ⌘Q` quits the app.
 
@@ -59,13 +62,38 @@ Clicking a ring in the menu bar opens the following menu.
 
 ## Account selection
 
-The app reads only the token of the account Claude Code uses, and never falls back to another account's token.
+The `계정 출처` submenu picks where the account list and the current account are read from. The default is `cca`.
 
-- When you pick a Claude account in the Orca app, it records that account's config directory in `~/Library/Application Support/orca/claude-profiles/selected-host`. If the file exists the app uses that directory. The keychain service is `Claude Code-credentials-<first 8 characters of the SHA-256 of the directory path>` and the email is read from `<directory>/.claude.json`.
-- If the file does not exist or is empty the app uses the default account. Orca leaves the file empty when you pick the default account. The keychain service is `Claude Code-credentials` and the email is read from `~/.claude.json`.
-- If the file exists but cannot be read, the app shows `계정 선택 파일 읽기 실패` (selection file unreadable) instead of falling back to the default account.
-- If the selected account has no keychain entry, the app reports an error and does not look for another account's token.
-- The app checks for an account switch every 60 seconds. When the account changes it clears the previous account's numbers and fetches again.
+### cca
+
+The `cca` tool manages the account list and the current account. The app reads the list and the current account from `~/.local/bin/cca ls --json`, and fetches each account's limits with that account's own token. It never falls back to another account's token.
+
+- The `default` account uses the config directory `~/.claude`, the keychain service `Claude Code-credentials`, and the email from `~/.claude.json`.
+- Every other account uses `~/.claude-accounts/<name>`, the keychain service `Claude Code-credentials-<first 8 characters of the SHA-256 of the directory path>`, and the email from `<directory>/.claude.json`.
+- The menu shows every account with its own limits. Clicking an account runs `cca use <name>` to make it the default; the switch affects only claude sessions started afterwards.
+- The rings in the menu bar show the current account (`cca current`). The app runs `cca current` every 60 seconds to notice when the current account changes.
+- When cca cannot be run the menu shows `cca 실행 실패` (cca failed to run), and when its response cannot be parsed it shows `cca 응답 파싱 실패` (cca response parse failure); no numbers are shown in either case.
+- If an account has no keychain entry, only that account is reported as an error and the app does not look for another account's token.
+
+#### Auto switch
+
+Turning on `자동 전환 (95%)` makes the app check, after every completed fetch, whether the current account's session limit or its weekly limit across all models is at 95% or more.
+
+- When a limit is at 95% or more, the app looks for another account that has no error and is under 95% on both session and weekly, then runs `cca use` for the one with the lowest session usage. On a tie it picks the earlier account in the list.
+- After switching it shows a notification like `자동 전환: <from> → <to> (세션 96%)`. The label is `세션` or `주간`, depending on which limit crossed the threshold.
+- If no account qualifies it does not switch and shows no notification.
+- Model-scoped weekly limits are ignored. A switch affects only claude sessions started afterwards; sessions already running keep using their account.
+
+### Orca
+
+The `Orca` source runs no processes and only reads Orca's profile directory.
+
+- The list shows `default` (`~/.claude`) first, then every directory under `~/Library/Application Support/orca/claude-profiles` that contains `profile.json`, sorted by name. A profile directory's config directory is its `home` subdirectory.
+- The keychain service name and the email are read from that config directory using the same rules as cca.
+- The current account is the config directory pointed to by the `selected-host` file in the same directory. When the file is missing or empty the current account is `default`. When the file points to a path that is not listed, the app appends that path to the list and uses it as the current account.
+- When the file cannot be read the menu shows `계정 선택 파일 읽기 실패` (account selection file read failure); no numbers are shown.
+- The rings in the menu bar show the limits of the account `selected-host` points to. The app re-reads that file every 60 seconds to notice when the current account changes.
+- Account headers do not switch anything when clicked. Tidemark never writes `selected-host`, so switch accounts in Orca.
 
 <br>
 
@@ -76,6 +104,7 @@ The app reads only the token of the account Claude Code uses, and never falls ba
 | macOS 13 or later | This is an AppKit menu bar app. |
 | Xcode Command Line Tools | The app builds with `swift build`. Install them with `xcode-select --install`, or install the Swift toolchain with `brew install swift`. |
 | Claude Code sign-in | You need to be signed in with an account that has a Claude subscription to read the limits. |
+| `cca` | Only needed for the cca account source. It must be at `~/.local/bin/cca` to read the account list and current account and to switch accounts. |
 
 <br>
 
@@ -96,6 +125,7 @@ Running the three lines in order stops the service and removes the app and the t
 ```sh
 swift build
 scripts/bundle.sh           # builds build/Tidemark.app
+scripts/test.sh             # runs the unit tests
 ```
 
 - **App icon** `swift scripts/make-icon.swift` regenerates `assets/AppIcon.icns`, and `scripts/bundle.sh` copies it into the bundle.

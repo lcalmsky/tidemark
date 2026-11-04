@@ -8,7 +8,17 @@ let package = Package(
         .executable(name: "tidemark", targets: ["tidemark"]),
     ],
     targets: [
-        .executableTarget(name: "tidemark", path: "Sources/tidemark"),
+        .target(name: "TidemarkCore", path: "Sources/TidemarkCore"),
+        .executableTarget(
+            name: "tidemark",
+            dependencies: ["TidemarkCore"],
+            path: "Sources/tidemark"
+        ),
+        .testTarget(
+            name: "TidemarkCoreTests",
+            dependencies: ["TidemarkCore"],
+            path: "Tests/TidemarkCoreTests"
+        ),
     ],
     swiftLanguageModes: [.v5]
 )

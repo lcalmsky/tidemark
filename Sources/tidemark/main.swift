@@ -1,6 +1,6 @@
 import AppKit
-import CryptoKit
 import Foundation
+import TidemarkCore
 
 enum AppInfo {
     static let version = "0.1.3"
@@ -101,29 +101,95 @@ private func roundedPercent(_ value: Double) -> Int {
 
 // MARK: - 계정
 
-/// Orca 가 쓰는 프로필 선택 파일. 앱 밖에서 관리되는 외부 의존이다.
-private let selectedHostPath = NSHomeDirectory()
-    + "/Library/Application Support/orca/claude-profiles/selected-host"
+/// GUI 앱은 PATH 에 ~/.local/bin 이 없어서 절대 경로로 부른다.
+private let ccaPath = NSHomeDirectory() + "/.local/bin/cca"
+private let orcaProfilesRoot = NSHomeDirectory() + "/Library/Application Support/orca/claude-profiles"
 
-/// 현재 선택된 Claude 계정. configDir 가 nil 이면 기본 계정(~/.claude)을 뜻한다.
-private struct Account {
+private enum AccountSource: String {
+    case cca
+    case orca
+
+    static var current: AccountSource {
+        AccountSource(rawValue: UserDefaults.standard.string(forKey: "accountSource") ?? "") ?? .cca
+    }
+}
+
+/// 계정 하나의 표시 상태. 이름이 default 면 configDir 가 nil 이다.
+private struct AccountState {
+    let name: String
     let configDir: String?
     let email: String?
     let plan: String?
+    let limits: [Limit]
+    let lastSuccess: Date?
+    let lastError: String?
+}
 
-    var displayName: String {
-        if let email = email, !email.isEmpty { return email }
-        guard let configDir = configDir else { return "default" }
-        let trimmed = configDir.hasSuffix("/") ? String(configDir.dropLast()) : configDir
-        let name = (trimmed as NSString).lastPathComponent
-        return name.isEmpty ? trimmed : name
+// MARK: - 프로세스
+
+private func runCommand(
+    _ executable: String,
+    _ arguments: [String],
+    timeout: TimeInterval = 10
+) -> (exitCode: Int32?, stdout: String) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+
+    let stdout = Pipe()
+    process.standardOutput = stdout
+    process.standardError = FileHandle.nullDevice
+
+    let finished = DispatchSemaphore(value: 0)
+    process.terminationHandler = { _ in finished.signal() }
+
+    do {
+        try process.run()
+    } catch {
+        return (nil, "")
     }
 
-    var menuTitle: String {
-        var title = "계정: " + displayName
-        if let plan = plan, !plan.isEmpty { title += " (\(plan))" }
-        return title
+    if finished.wait(timeout: .now() + timeout) == .timedOut {
+        process.terminate()
+        _ = finished.wait(timeout: .now() + 2)
+        return (nil, "")
     }
+
+    let data = stdout.fileHandleForReading.readDataToEndOfFile()
+    return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+}
+
+// MARK: - 계정 목록
+
+private func listCca() -> ListingResult {
+    let result = runCommand(ccaPath, ["ls", "--json"])
+    guard result.exitCode == 0 else { return .failure("cca 실행 실패") }
+    guard let listing = parseCcaListing(result.stdout, home: NSHomeDirectory()) else {
+        return .failure("cca 응답 파싱 실패")
+    }
+    return .success(listing)
+}
+
+private func readOrcaSelection() -> OrcaSelection {
+    let path = orcaProfilesRoot + "/selected-host"
+    guard FileManager.default.fileExists(atPath: path) else { return .none }
+    guard let data = FileManager.default.contents(atPath: path),
+          let text = String(data: data, encoding: .utf8) else { return .unreadable }
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? .none : .path(trimmed)
+}
+
+private func listOrca() -> ListingResult {
+    let selection = readOrcaSelection()
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: orcaProfilesRoot)) ?? []
+    let profileNames = names.filter {
+        FileManager.default.fileExists(atPath: orcaProfilesRoot + "/" + $0 + "/profile.json")
+    }
+    return resolveOrcaListing(
+        selection: selection,
+        profileNames: profileNames,
+        profilesRoot: orcaProfilesRoot
+    )
 }
 
 // MARK: - 앱
@@ -132,12 +198,12 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
 
-    private var limits: [Limit] = []
-    private var account: Account?
-    private var lastFetchedConfigDir: String?
-    private var lastSuccess: Date?
-    private var lastError: String?
+    private var currentName: String?
+    private var accounts: [AccountState] = []
+    private var globalError: String?
     private var isFetching = false
+    private var pendingFetch = false
+    private var isSwitching = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         menu.autoenablesItems = false
@@ -152,12 +218,37 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         RunLoop.main.add(timer, forMode: .common)
 
-        // 남은 시간 표시를 갱신하고, 계정이 바뀌었을 때만 수집을 다시 건다.
         let titleTimer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             self.renderTitle()
-            if (try? Self.currentConfigDir()) != self.lastFetchedConfigDir {
-                self.fetch()
+            switch AccountSource.current {
+            case .cca:
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    guard let self = self else { return }
+                    let result = runCommand(ccaPath, ["current"])
+                    guard result.exitCode == 0 else { return }
+                    let name = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !name.isEmpty else { return }
+                    DispatchQueue.main.async {
+                        if name != self.currentName { self.fetch() }
+                    }
+                }
+            case .orca:
+                let selection = readOrcaSelection()
+                DispatchQueue.main.async {
+                    switch selection {
+                    case .unreadable:
+                        if self.globalError == nil { self.fetch() }
+                    case .none:
+                        if self.currentName != "default" { self.fetch() }
+                    case .path(let path):
+                        let normalized = normalizePath(path)
+                        let name = self.accounts.first {
+                            $0.configDir.map(normalizePath) == normalized
+                        }?.name ?? URL(fileURLWithPath: normalized).lastPathComponent
+                        if name != self.currentName { self.fetch() }
+                    }
+                }
             }
         }
         RunLoop.main.add(titleTimer, forMode: .common)
@@ -205,17 +296,21 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func titleItems() -> [TitleItem] {
         var items: [TitleItem] = []
+        let current = accounts.first { $0.name == currentName }
 
-        if lastSuccess == nil {
+        guard let account = current, account.lastSuccess != nil else {
             items.append(textItem("C …", font: Self.valueFont, color: .labelColor))
-            if lastError != nil {
+            let hasError = globalError != nil
+                || current?.lastError != nil
+                || (current == nil && accounts.contains { $0.lastError != nil })
+            if hasError {
                 items.append(textItem(" ?", font: Self.valueFont, color: .labelColor))
             }
             return items
         }
 
         var body: [TitleItem] = []
-        for segment in titleSegments() {
+        for segment in titleSegments(account.limits) {
             if !body.isEmpty { body.append(gap(Self.segmentGap)) }
             body.append(ringItem(letter: segment.letter, percent: segment.percent))
             body.append(gap(4))
@@ -234,7 +329,7 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        if lastError != nil {
+        if account.lastError != nil {
             body.append(textItem(" ?", font: Self.valueFont, color: .labelColor))
         }
         items.append(contentsOf: body)
@@ -325,7 +420,9 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return .labelColor
     }
 
-    private func titleSegments() -> [(letter: String, percent: Double, resetsAt: String?)] {
+    private func titleSegments(
+        _ limits: [Limit]
+    ) -> [(letter: String, percent: Double, resetsAt: String?)] {
         var segments: [(letter: String, percent: Double, resetsAt: String?)] = []
         for limit in limits {
             guard let kind = limit.kind, let percent = limit.percent else { continue }
@@ -355,36 +452,63 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func rebuildMenu() {
         menu.removeAllItems()
+        let source = AccountSource.current
+        let isOrca = source == .orca
 
-        let current = account ?? Account(configDir: try? Self.currentConfigDir(), email: nil, plan: nil)
-        menu.addItem(disabledItem(current.menuTitle))
-        menu.addItem(.separator())
+        for account in accounts {
+            let header = NSMenuItem(
+                title: headerTitle(account, isOrca: isOrca),
+                action: isOrca ? nil : #selector(selectAccount(_:)),
+                keyEquivalent: ""
+            )
+            header.target = self
+            header.representedObject = account.name
+            header.isEnabled = true
+            header.state = account.name == currentName ? .on : .off
+            menu.addItem(header)
 
-        for limit in limits {
-            guard let kind = limit.kind, let percent = limit.percent else { continue }
-            let label: String
-            switch kind {
-            case "session": label = "세션"
-            case "weekly_all": label = "주간"
-            case "weekly_scoped": label = limit.scope?.model?.display_name ?? "주간"
-            default: continue
+            for limit in account.limits {
+                guard let kind = limit.kind, let percent = limit.percent else { continue }
+                let label: String
+                switch kind {
+                case "session": label = "세션"
+                case "weekly_all": label = "주간"
+                case "weekly_scoped": label = limit.scope?.model?.display_name ?? "주간"
+                default: continue
+                }
+
+                var text = "\(label)  \(roundedPercent(percent))%"
+                if let raw = limit.resets_at, let date = Format.parseTimestamp(raw) {
+                    text += "  · 리셋까지 " + Format.remaining(date.timeIntervalSinceNow)
+                }
+                let item = disabledItem(text)
+                item.indentationLevel = 1
+                menu.addItem(item)
             }
 
-            var text = "\(label)  \(roundedPercent(percent))%"
-            if let raw = limit.resets_at, let date = Format.parseTimestamp(raw) {
-                text += "  · 리셋까지 " + Format.remaining(date.timeIntervalSinceNow)
+            if let lastSuccess = account.lastSuccess {
+                let item = disabledItem("갱신: " + Format.clock.string(from: lastSuccess))
+                item.indentationLevel = 1
+                menu.addItem(item)
             }
-            menu.addItem(disabledItem(text))
+            if let lastError = account.lastError {
+                let item = disabledItem("오류: " + lastError)
+                item.indentationLevel = 1
+                menu.addItem(item)
+            }
+
+            menu.addItem(.separator())
         }
 
-        menu.addItem(.separator())
+        menu.addItem(disabledItem(
+            isOrca ? "계정 전환은 Orca 에서" : "전환은 새로 여는 claude 세션부터 적용"
+        ))
+        if let globalError = globalError {
+            menu.addItem(disabledItem("오류: " + globalError))
+        }
 
-        if let lastSuccess = lastSuccess {
-            menu.addItem(disabledItem("갱신: " + Format.clock.string(from: lastSuccess)))
-        }
-        if let lastError = lastError {
-            menu.addItem(disabledItem("오류: " + lastError))
-        }
+        menu.addItem(sourceMenuItem())
+        menu.addItem(autoSwitchItem(isOrca: isOrca))
 
         menu.addItem(.separator())
 
@@ -399,10 +523,119 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(quit)
     }
 
+    private func headerTitle(_ account: AccountState, isOrca: Bool) -> String {
+        var title = account.name
+        if isOrca {
+            title = account.name == "default" ? "default" : String(account.name.prefix(8))
+        }
+        if let email = account.email, !email.isEmpty {
+            title += " · " + email
+        }
+        if let plan = account.plan, !plan.isEmpty {
+            title += " (\(plan))"
+        }
+        return title
+    }
+
+    private func sourceMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "계정 출처", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        for source in [AccountSource.cca, AccountSource.orca] {
+            let entry = NSMenuItem(
+                title: source == .cca ? "cca" : "Orca",
+                action: #selector(selectSource(_:)),
+                keyEquivalent: ""
+            )
+            entry.target = self
+            entry.representedObject = source.rawValue
+            entry.isEnabled = true
+            entry.state = source == AccountSource.current ? .on : .off
+            submenu.addItem(entry)
+        }
+        item.submenu = submenu
+        item.isEnabled = true
+        return item
+    }
+
+    private func autoSwitchItem(isOrca: Bool) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: "자동 전환 (95%)",
+            action: #selector(toggleAutoSwitch(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.isEnabled = !isOrca
+        item.state = UserDefaults.standard.bool(forKey: "autoSwitch") ? .on : .off
+        return item
+    }
+
     private func disabledItem(_ title: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
         return item
+    }
+
+    @objc private func selectAccount(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String, name != currentName else { return }
+        switchAccount(to: name) { [weak self] success in
+            if success { self?.fetch() }
+        }
+    }
+
+    @objc private func selectSource(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let source = AccountSource(rawValue: raw),
+              source != AccountSource.current else { return }
+        UserDefaults.standard.set(source.rawValue, forKey: "accountSource")
+        accounts = []
+        currentName = nil
+        globalError = nil
+        renderTitle()
+        rebuildMenu()
+        fetch()
+    }
+
+    @objc private func toggleAutoSwitch(_ sender: NSMenuItem) {
+        let defaults = UserDefaults.standard
+        defaults.set(!defaults.bool(forKey: "autoSwitch"), forKey: "autoSwitch")
+        rebuildMenu()
+        if AccountSource.current == .cca { evaluateAutoSwitch() }
+    }
+
+    private func switchAccount(to name: String, completion: ((Bool) -> Void)? = nil) {
+        guard !isSwitching else { return }
+        isSwitching = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let result = runCommand(ccaPath, ["use", name])
+            DispatchQueue.main.async {
+                self.isSwitching = false
+                switch result.exitCode {
+                case 0:
+                    self.currentName = name
+                    self.globalError = nil
+                    self.renderTitle()
+                    self.rebuildMenu()
+                    completion?(true)
+                case 2:
+                    self.globalError = "계정 전환 실패: 이름 오류"
+                    self.renderTitle()
+                    self.rebuildMenu()
+                    completion?(false)
+                case 3:
+                    self.globalError = "계정 전환 실패: 없는 계정"
+                    self.renderTitle()
+                    self.rebuildMenu()
+                    completion?(false)
+                default:
+                    self.globalError = "계정 전환 실패"
+                    self.renderTitle()
+                    self.rebuildMenu()
+                    completion?(false)
+                }
+            }
+        }
     }
 
     @objc private func refreshNow() {
@@ -416,63 +649,156 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: 수집
 
     private func fetch() {
-        guard !isFetching else { return }
-        let configDir: String?
-        do {
-            configDir = try Self.currentConfigDir()
-        } catch {
-            // 어느 계정인지 모르는 채로 기본 계정 토큰을 쓰지 않는다. 이전 계정의 수치도 지운다.
-            account = nil
-            limits = []
-            lastSuccess = nil
-            lastFetchedConfigDir = nil
-            lastError = "계정 선택 파일 읽기 실패"
-            renderTitle()
-            rebuildMenu()
+        // 조회 중에 계정이 바뀌면 진행 중인 조회는 이전 current 를 들고 오므로, 끝난 뒤 한 번 더 조회한다.
+        guard !isFetching else {
+            pendingFetch = true
             return
         }
         isFetching = true
-        lastFetchedConfigDir = configDir
+        let previous = accounts
+        let source = AccountSource.current
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
-            let outcome = self.collect(configDir: configDir)
+            let result: ListingResult
+            switch source {
+            case .cca: result = listCca()
+            case .orca: result = listOrca()
+            }
+
+            let listing: AccountListing
+            switch result {
+            case .failure(let reason):
+                DispatchQueue.main.async {
+                    self.isFetching = false
+                    guard source == AccountSource.current else {
+                        self.fetch()
+                        return
+                    }
+                    self.globalError = reason
+                    self.accounts = []
+                    self.currentName = nil
+                    self.renderTitle()
+                    self.rebuildMenu()
+                    if self.pendingFetch {
+                        self.pendingFetch = false
+                        self.fetch()
+                    }
+                }
+                return
+            case .success(let value):
+                listing = value
+            }
+
+            let previousByName = Dictionary(
+                previous.map { ($0.name, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            var states: [AccountState] = []
+            for entry in listing.entries {
+                let prior = previousByName[entry.name]
+                let email = entry.email ?? Self.accountEmail(for: entry.configDir) ?? prior?.email
+
+                switch self.collect(configDir: entry.configDir) {
+                case .success(let limits, let plan):
+                    states.append(AccountState(
+                        name: entry.name,
+                        configDir: entry.configDir,
+                        email: email,
+                        plan: plan,
+                        limits: limits,
+                        lastSuccess: Date(),
+                        lastError: nil
+                    ))
+                case .failure(let reason, let plan):
+                    states.append(AccountState(
+                        name: entry.name,
+                        configDir: entry.configDir,
+                        email: email,
+                        plan: plan ?? prior?.plan,
+                        limits: prior?.limits ?? [],
+                        lastSuccess: prior?.lastSuccess,
+                        lastError: reason
+                    ))
+                }
+            }
+
             DispatchQueue.main.async {
                 self.isFetching = false
-                switch outcome {
-                case .success(let limits, let account):
-                    self.apply(account)
-                    self.limits = limits
-                    self.lastSuccess = Date()
-                    self.lastError = nil
-                case .failure(let reason, let account):
-                    self.apply(account)
-                    self.lastError = reason
+                guard source == AccountSource.current else {
+                    self.fetch()
+                    return
                 }
+                self.currentName = listing.current
+                self.accounts = states
+                self.globalError = nil
                 self.renderTitle()
                 self.rebuildMenu()
+                if self.pendingFetch {
+                    self.pendingFetch = false
+                    self.fetch()
+                } else if source == .cca {
+                    self.evaluateAutoSwitch()
+                }
             }
         }
     }
 
-    /// 계정이 바뀌면 이전 계정의 수치가 새 이름 아래 남지 않도록 지운다.
-    private func apply(_ account: Account) {
-        if account.configDir != self.account?.configDir {
-            limits = []
-            lastSuccess = nil
+    // MARK: 자동 전환
+
+    private static let autoSwitchThreshold: Double = 95
+
+    private static func percent(of kind: String, in limits: [Limit]) -> Double? {
+        limits.first { $0.kind == kind }?.percent
+    }
+
+    private func evaluateAutoSwitch() {
+        guard UserDefaults.standard.bool(forKey: "autoSwitch"),
+              let from = currentName else { return }
+
+        let usages = accounts.map { account in
+            AccountUsage(
+                name: account.name,
+                ok: account.lastError == nil && account.lastSuccess != nil,
+                sessionPercent: Self.percent(of: "session", in: account.limits),
+                weeklyAllPercent: Self.percent(of: "weekly_all", in: account.limits)
+            )
         }
-        self.account = account
+        guard let decision = autoSwitchDecision(
+            currentName: from,
+            accounts: usages,
+            threshold: Self.autoSwitchThreshold
+        ) else { return }
+
+        switchAccount(to: decision.target) { [weak self] success in
+            guard success, let self = self else { return }
+            self.postNotification(
+                "자동 전환: \(from) → \(decision.target) (\(decision.label) \(decision.percent)%)"
+            )
+        }
+    }
+
+    /// 개발용 바이너리는 앱 번들이 없어 UserNotifications 를 쓸 수 없으므로 osascript 로 띄운다.
+    private func postNotification(_ body: String) {
+        DispatchQueue.global(qos: .utility).async {
+            let escaped = body
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            _ = runCommand("/usr/bin/osascript", [
+                "-e", "display notification \"\(escaped)\" with title \"Tidemark\"",
+            ])
+        }
     }
 
     private enum Outcome {
-        case success([Limit], Account)
-        case failure(String, Account)
+        case success([Limit], String?)
+        case failure(String, String?)
     }
 
     private func collect(configDir: String?) -> Outcome {
-        let service = Self.keychainService(for: configDir)
+        let service = keychainService(for: configDir)
         guard let credentials = Self.credentials(service: service) else {
-            return .failure("토큰 조회 실패", Self.account(configDir: configDir, plan: nil))
+            return .failure("토큰 조회 실패", nil)
         }
 
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
@@ -494,25 +820,23 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         task.resume()
 
-        let account = Self.account(configDir: configDir, plan: credentials.plan)
-
         if semaphore.wait(timeout: .now() + 20) == .timedOut {
             task.cancel()
-            return .failure("시간 초과", account)
+            return .failure("시간 초과", credentials.plan)
         }
         if transportError != nil {
-            return .failure("네트워크 오류", account)
+            return .failure("네트워크 오류", credentials.plan)
         }
         guard let code = status else {
-            return .failure("응답 없음", account)
+            return .failure("응답 없음", credentials.plan)
         }
         guard code == 200 else {
-            return .failure("HTTP \(code)", account)
+            return .failure("HTTP \(code)", credentials.plan)
         }
         guard let data = body, let limits = Self.decodeLimits(data) else {
-            return .failure("응답 파싱 실패", account)
+            return .failure("응답 파싱 실패", credentials.plan)
         }
-        return .success(limits, account)
+        return .success(limits, credentials.plan)
     }
 
     private static func decodeLimits(_ data: Data) -> [Limit]? {
@@ -531,31 +855,6 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let plan: String?
     }
 
-    private struct SelectionUnreadable: Error {}
-
-    /// 선택된 config 디렉터리. nil 이면 기본 계정(~/.claude)이다.
-    /// 선택 파일이 없거나 비어 있으면 기본 계정이다. Orca 는 기본 계정을 고르면 빈 내용을 쓴다.
-    /// 파일이 있는데 읽지 못하면 오류로 던진다.
-    private static func currentConfigDir() throws -> String? {
-        guard FileManager.default.fileExists(atPath: selectedHostPath) else { return nil }
-        guard let data = FileManager.default.contents(atPath: selectedHostPath),
-              let raw = String(data: data, encoding: .utf8) else { throw SelectionUnreadable() }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    /// 기본이 아닌 config 디렉터리의 키체인 항목에는 경로 SHA-256 앞 8자리가 붙는다.
-    private static func keychainService(for configDir: String?) -> String {
-        guard let configDir = configDir else { return "Claude Code-credentials" }
-        let digest = SHA256.hash(data: Data(configDir.utf8))
-        let hex = digest.map { String(format: "%02x", $0) }.joined()
-        return "Claude Code-credentials-" + String(hex.prefix(8))
-    }
-
-    private static func account(configDir: String?, plan: String?) -> Account {
-        Account(configDir: configDir, email: accountEmail(for: configDir), plan: plan)
-    }
-
     private static func accountEmail(for configDir: String?) -> String? {
         let path = configDir.map { $0 + "/.claude.json" } ?? (NSHomeDirectory() + "/.claude.json")
         guard let data = FileManager.default.contents(atPath: path),
@@ -565,7 +864,7 @@ private final class UsageBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return email
     }
 
-    /// 선택된 계정의 항목만 읽는다. 다른 계정 항목으로 내려가지 않는다.
+    /// 주어진 서비스의 항목만 읽는다. 다른 계정 항목으로 내려가지 않는다.
     /// 토큰은 어떤 경로로도 출력하지 않는다.
     private static func credentials(service: String) -> Credentials? {
         let process = Process()
